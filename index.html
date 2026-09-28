@@ -1,0 +1,281 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Screen Distance Detector</title>
+<style>
+  body {
+    font-family: system-ui, -apple-system, sans-serif;
+    margin: 0;
+    background: #0f1115;
+    color: #eee;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 14px;
+    padding: 22px;
+    text-align: center;
+    transition: background 0.3s ease;
+  }
+  body.too-close {
+    background: #8B0000;
+  }
+  body.good-distance {
+    background: #006400;
+  }
+  h1 { margin: 6px 0 0; font-size: 26px; }
+  p.note { margin: 0; opacity: .75; font-size: 14px; max-width: 520px; line-height: 1.55; }
+  button {
+    font-size: 17px;
+    padding: 11px 22px;
+    border: 0;
+    border-radius: 12px;
+    background: #FF4A1C;
+    color: #fff;
+    font-weight: 700;
+    cursor: pointer;
+  }
+  button:disabled { opacity: .5; cursor: default; }
+  #cam canvas { border-radius: 12px; }
+  #label { font-family: ui-monospace, monospace; font-size: 13px; opacity: .8; min-height: 18px; }
+  #stage {
+    width: min(92vw, 520px);
+    min-height: 220px;
+    border-radius: 16px;
+    border: 1px solid #23262e;
+    display: grid;
+    place-items: center;
+    padding: 20px;
+    overflow: hidden;
+    transition: background 0.12s ease;
+  }
+  #stage .big { font-size: 42px; font-weight: 800; color: #fff; line-height: 1.1; }
+  .hint { opacity: .4; }
+  [hidden] { display: none !important; }
+  .status-badge {
+    display: inline-block;
+    padding: 8px 16px;
+    border-radius: 20px;
+    font-weight: 700;
+    font-size: 14px;
+    margin-top: 10px;
+  }
+  .status-too-close { background: #FF4A1C; color: white; }
+  .status-good-distance { background: #00C851; color: white; }
+</style>
+</head>
+<body>
+  <h1>📏 Screen Distance Detector</h1>
+  <p class="note">
+    Click Start and allow the camera. Position yourself at different distances from the screen.
+    The system will detect if you're <b>Too Close</b> or at a <b>Good Distance</b>.
+  </p>
+  <button id="startBtn">▶ Start Camera</button>
+  <div id="cam"></div>
+  <div id="label">not running yet</div>
+  <div id="stage">
+    <span class="hint" id="hint">Your detection status appears here</span>
+    <div class="big" id="statusText" hidden></div>
+    <div class="status-badge" id="statusBadge" hidden></div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@1.3.1/dist/tf.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@teachablemachine/image@0.8/dist/teachablemachine-image.min.js"></script>
+  <script>
+  /* ================ CHANGE THIS (make it yours) ================ */
+  // Replace with your Teachable Machine model URL (keep the "/" at the end)
+  // Get this from: Teachable Machine > Export Model > TensorFlow.js > Upload > Copy link
+  const MODEL_URL = "https://teachablemachine.withgoogle.com/models/S75C_fwK3/"
+
+  // Class names MUST match exactly what you named them in Teachable Machine
+  const CLASS_TOO_CLOSE = "Too Close";      // <-- Change to match your class name
+  const CLASS_GOOD_DISTANCE = "Good Distance";  // <-- Change to match your class name
+
+  const CONFIDENCE_THRESHOLD = 0.85;  // Minimum confidence to trigger (0.0 - 1.0)
+  const COOLDOWN_MS = 1000;           // Minimum time between state changes (ms)
+  /* ===================================================================== */
+
+  let model, webcam;
+  let isRunning = false;
+  let lastStatus = null;        // Tracks current state: "too-close", "good-distance", or null
+  let lastChangeTime = 0;       // For cooldown between state changes
+  let audioContext = null;
+
+  const stage = document.getElementById("stage");
+  const hint = document.getElementById("hint");
+  const statusText = document.getElementById("statusText");
+  const statusBadge = document.getElementById("statusBadge");
+  const label = document.getElementById("label");
+  const body = document.body;
+
+  // Initialize audio context on first user interaction
+  function initAudio() {
+    if (!audioContext) {
+      audioContext = new (window.AudioContext || window.webkitAudioContext)();
+    }
+    // Resume if suspended (browser policy)
+    if (audioContext.state === 'suspended') {
+      audioContext.resume();
+    }
+  }
+
+  // Play warning sound for "Too Close" - low frequency alert
+  function playWarningSound() {
+    try {
+      initAudio();
+      const oscillator = audioContext.createOscillator();
+      const gain = audioContext.createGain();
+      
+      oscillator.type = "sawtooth";
+      oscillator.frequency.value = 220;  // Low A3 note
+      oscillator.connect(gain);
+      gain.connect(audioContext.destination);
+      
+      // Quick attack, sustain, quick release
+      const now = audioContext.currentTime;
+      gain.gain.setValueAtTime(0.001, now);
+      gain.gain.exponentialRampToValueAtTime(0.3, now + 0.02);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.5);
+      
+      oscillator.start(now);
+      oscillator.stop(now + 0.55);
+    } catch (e) {
+      console.warn("Could not play warning sound:", e);
+    }
+  }
+
+  // Play "ting" sound for "Good Distance" - high frequency notification
+  function playTingSound() {
+    try {
+      initAudio();
+      const oscillator = audioContext.createOscillator();
+      const gain = audioContext.createGain();
+      
+      oscillator.type = "sine";
+      oscillator.frequency.value = 880;  // High A5 note
+      oscillator.connect(gain);
+      gain.connect(audioContext.destination);
+      
+      // Very short, crisp ting
+      const now = audioContext.currentTime;
+      gain.gain.setValueAtTime(0.001, now);
+      gain.gain.exponentialRampToValueAtTime(0.2, now + 0.01);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.15);
+      
+      oscillator.start(now);
+      oscillator.stop(now + 0.16);
+    } catch (e) {
+      console.warn("Could not play ting sound:", e);
+    }
+  }
+
+  // Update UI based on detected status
+  function updateUI(status, confidence) {
+    const now = Date.now();
+    
+    // Check cooldown to prevent rapid state flipping
+    if (now - lastChangeTime < COOLDOWN_MS) {
+      return; // Still in cooldown, don't change state
+    }
+
+    // Determine new status
+    let newStatus = null;
+    if (status === CLASS_TOO_CLOSE && confidence >= CONFIDENCE_THRESHOLD) {
+      newStatus = "too-close";
+    } else if (status === CLASS_GOOD_DISTANCE && confidence >= CONFIDENCE_THRESHOLD) {
+      newStatus = "good-distance";
+    }
+
+    // Only update if status actually changed
+    if (newStatus !== lastStatus) {
+      lastStatus = newStatus;
+      lastChangeTime = now;
+
+      // Reset all classes
+      body.classList.remove("too-close", "good-distance");
+      hint.hidden = true;
+      statusText.hidden = true;
+      statusBadge.hidden = true;
+
+      if (newStatus === "too-close") {
+        // TOO CLOSE - Red screen + warning sound
+        body.classList.add("too-close");
+        stage.style.background = "#8B0000";
+        statusText.hidden = false;
+        statusText.textContent = "⚠️ TOO CLOSE";
+        statusBadge.hidden = false;
+        statusBadge.textContent = "TOO CLOSE";
+        statusBadge.className = "status-badge status-too-close";
+        playWarningSound();
+      } else if (newStatus === "good-distance") {
+        // GOOD DISTANCE - Green screen + ting sound
+        body.classList.add("good-distance");
+        stage.style.background = "#006400";
+        statusText.hidden = false;
+        statusText.textContent = "✅ GOOD DISTANCE";
+        statusBadge.hidden = false;
+        statusBadge.textContent = "GOOD DISTANCE";
+        statusBadge.className = "status-badge status-good-distance";
+        playTingSound();
+      } else {
+        // No confident detection - neutral state
+        stage.style.background = "";
+        hint.hidden = false;
+        hint.textContent = "Position yourself in front of the camera...";
+      }
+    }
+
+    // Always update the prediction label
+    label.textContent = `${status} - ${(confidence * 100).toFixed(1)}%`;
+  }
+
+  // Start the camera and model
+  document.getElementById("startBtn").onclick = async function start() {
+    initAudio(); // Initialize audio on user click
+    
+    label.textContent = "loading model...";
+    try {
+      model = await tmImage.load(MODEL_URL + "model.json", MODEL_URL + "metadata.json");
+    } catch (e) {
+      label.textContent = "❌ Failed to load model. Check MODEL_URL in the code.";
+      console.error(e);
+      return;
+    }
+
+    webcam = new tmImage.Webcam(200, 200, true); // width, height, flip
+    await webcam.setup(); // request camera access
+    await webcam.play();
+    document.getElementById("cam").appendChild(webcam.canvas);
+    
+    document.getElementById("startBtn").disabled = true;
+    label.textContent = "running! Move closer/further from screen.";
+    isRunning = true;
+    requestAnimationFrame(loop);
+  };
+
+  // Main prediction loop
+  async function loop() {
+    if (!isRunning) return;
+    webcam.update(); // Get new frame from webcam
+    await predict();
+    requestAnimationFrame(loop);
+  }
+
+  // Run prediction and handle results
+  async function predict() {
+    const predictions = await model.predict(webcam.canvas);
+    
+    // Find the top prediction
+    let top = predictions[0];
+    for (const p of predictions) {
+      if (p.probability > top.probability) top = p;
+    }
+    
+    // Update UI with the top prediction
+    updateUI(top.className, top.probability);
+  }
+  </script>
+</body>
+</html>
