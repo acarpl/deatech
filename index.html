@@ -67,16 +67,16 @@
 </style>
 </head>
 <body>
-  <h1>📏 Screen Distance Detector</h1>
+  <h1>📏 Detektor Jarak Layar</h1>
   <p class="note">
-    Click Start and allow the camera. Position yourself at different distances from the screen.
-    The system will detect if you're <b>Too Close</b> or at a <b>Good Distance</b>.
+    Klik Mulai dan izinkan akses kamera. Posisikan diri Anda pada jarak berbeda dari layar.
+    Sistem akan mendeteksi apakah Anda <b>Terlalu Dekat</b> atau pada <b>Jarak Baik</b>.
   </p>
-  <button id="startBtn">▶ Start Camera</button>
+  <button id="startBtn">▶ Mulai Kamera</button>
   <div id="cam"></div>
-  <div id="label">not running yet</div>
+  <div id="label">belum berjalan</div>
   <div id="stage">
-    <span class="hint" id="hint">Your detection status appears here</span>
+    <span class="hint" id="hint">Status deteksi akan muncul di sini</span>
     <div class="big" id="statusText" hidden></div>
     <div class="status-badge" id="statusBadge" hidden></div>
   </div>
@@ -84,196 +84,249 @@
   <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@1.3.1/dist/tf.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/@teachablemachine/image@0.8/dist/teachablemachine-image.min.js"></script>
   <script>
-  /* ================ CHANGE THIS (make it yours) ================ */
-  // Replace with your Teachable Machine model URL (keep the "/" at the end)
-  // Get this from: Teachable Machine > Export Model > TensorFlow.js > Upload > Copy link
-  const MODEL_URL = "https://teachablemachine.withgoogle.com/models/S75C_fwK3/"
+  /* ============================================================================
+     TUTORIAL: Screen Distance Detector dengan Teachable Machine & TensorFlow.js
+     ============================================================================
+     
+     Aplikasi ini mendeteksi jarak pengguna dari layar menggunakan kamera webcam
+     dan model AI dari Teachable Machine (Google).
+     
+     CARA KERJA:
+     1. Load model TensorFlow.js dari Teachable Machine
+     2. Akses kamera webcam user
+     3. Setiap frame dikirim ke model untuk prediksi
+     4. Berdasarkan hasil prediksi, tampilkan status "Terlalu Dekat" atau "Jarak Baik"
+     5. Ubah warna background & mainkan suara sesuai status
+  
+     CARA MENJALANKAN (WAJIB PAKAI LOCALHOST):
+     - VS Code: Install ekstensi "Live Server" -> Klik kanan index.html -> "Open with Live Server"
+     - Terminal: python -m http.server -> buka http://localhost:8000
+     - JANGAN double-klik file HTML langsung (kamera tidak akan jalan)
+  
+     KUSTOMISASI MODEL SENDIRI:
+     1. Buka https://teachablemachine.withgoogle.com
+     2. New Project -> Image -> Standard
+     3. Buat 2 class: "Terlalu Dekat" & "Jarak Baik" (atau nama bebas)
+     4. Rekam sampel foto untuk tiap class pakai webcam
+     5. Klik "Train Model"
+     6. Export Model -> TensorFlow.js -> Upload -> Copy link
+     7. Ganti MODEL_URL di bawah (harus diakhiri "/")
+     8. Ganti CLASS_TOO_CLOSE & CLASS_GOOD_DISTANCE sesuai nama class di TM
+  ============================================================================ */
 
-  // Class names MUST match exactly what you named them in Teachable Machine
-  const CLASS_TOO_CLOSE = "Too Close";      // <-- Change to match your class name
-  const CLASS_GOOD_DISTANCE = "Good Distance";  // <-- Change to match your class name
+  /* ================ KONFIGURASI (UBAH SESUAI KEBUTUHAN) ================ */
+  // URL model dari Teachable Machine (HARUS diakhiri "/")
+  // Dapatkan dari: Teachable Machine > Export Model > TensorFlow.js > Upload > Copy link
+  const MODEL_URL = "https://teachablemachine.withgoogle.com/models/S75C_fwK3/";
 
-  const CONFIDENCE_THRESHOLD = 0.85;  // Minimum confidence to trigger (0.0 - 1.0)
-  const COOLDOWN_MS = 1000;           // Minimum time between state changes (ms)
+  // Nama class HARUS persis sama dengan yang dibuat di Teachable Machine (case-sensitive)
+  const CLASS_TOO_CLOSE = "Too Close";        // Ganti sesuai nama class "Terlalu Dekat" di TM
+  const CLASS_GOOD_DISTANCE = "Good Distance"; // Ganti sesuai nama class "Jarak Baik" di TM
+
+  const CONFIDENCE_THRESHOLD = 0.85;  // Ambang batas kepercayaan (0.0 - 1.0), naikkan untuk lebih ketat
+  const COOLDOWN_MS = 1000;           // Jeda minimal antar perubahan status (ms), anti-flicker
   /* ===================================================================== */
 
-  let model, webcam;
-  let isRunning = false;
-  let lastStatus = null;        // Tracks current state: "too-close", "good-distance", or null
-  let lastChangeTime = 0;       // For cooldown between state changes
-  let audioContext = null;
+  // Variabel global
+  let model, webcam;                    // Model AI & instance webcam
+  let isRunning = false;                // Flag apakah deteksi sedang berjalan
+  let lastStatus = null;                // Status terakhir: "too-close", "good-distance", atau null
+  let lastChangeTime = 0;               // Timestamp perubahan status terakhir (untuk cooldown)
+  let audioContext = null;              // Web Audio API context untuk suara
 
-  const stage = document.getElementById("stage");
-  const hint = document.getElementById("hint");
-  const statusText = document.getElementById("statusText");
-  const statusBadge = document.getElementById("statusBadge");
-  const label = document.getElementById("label");
-  const body = document.body;
+  // Ambil elemen DOM
+  const stage = document.getElementById("stage");       // Area tampilan status utama
+  const hint = document.getElementById("hint");         // Text petunjuk awal
+  const statusText = document.getElementById("statusText"); // Text status besar (⚠️/✅)
+  const statusBadge = document.getElementById("statusBadge"); // Badge status kecil
+  const label = document.getElementById("label");       // Label prediksi + confidence
+  const body = document.body;                           // Body untuk ganti background
 
-  // Initialize audio context on first user interaction
+  /* ============================================================================
+     AUDIO: Inisialisasi Web Audio API (harus dipicu interaksi user)
+     ============================================================================ */
   function initAudio() {
     if (!audioContext) {
+      // Buat AudioContext (prefix webkit untuk Safari lama)
       audioContext = new (window.AudioContext || window.webkitAudioContext)();
     }
-    // Resume if suspended (browser policy)
+    // Browser suspend AudioContext otomatis sampai ada interaksi user
     if (audioContext.state === 'suspended') {
       audioContext.resume();
     }
   }
 
-  // Play warning sound for "Too Close" - low frequency alert
+  /* ============================================================================
+     SUARA PERINGATAN: "Terlalu Dekat" - Nada rendah (sawtooth wave)
+     ============================================================================ */
   function playWarningSound() {
     try {
       initAudio();
-      const oscillator = audioContext.createOscillator();
-      const gain = audioContext.createGain();
+      const oscillator = audioContext.createOscillator(); // Generator nada
+      const gain = audioContext.createGain();             // Kontrol volume
       
-      oscillator.type = "sawtooth";
-      oscillator.frequency.value = 220;  // Low A3 note
+      oscillator.type = "sawtooth";       // Gelombang bergerigi = suara kasar/peringatan
+      oscillator.frequency.value = 220;   // Nada A3 (rendah)
       oscillator.connect(gain);
-      gain.connect(audioContext.destination);
+      gain.connect(audioContext.destination); // Ke speaker
       
-      // Quick attack, sustain, quick release
+      // Envelope: Attack cepat -> Sustain -> Release cepat
       const now = audioContext.currentTime;
-      gain.gain.setValueAtTime(0.001, now);
-      gain.gain.exponentialRampToValueAtTime(0.3, now + 0.02);
-      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.5);
+      gain.gain.setValueAtTime(0.001, now);                    // Mulai dari diam
+      gain.gain.exponentialRampToValueAtTime(0.3, now + 0.02); // Naik cepat (attack)
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.5); // Turun pelan (release)
       
       oscillator.start(now);
-      oscillator.stop(now + 0.55);
+      oscillator.stop(now + 0.55); // Durasi ~0.55 detik
     } catch (e) {
-      console.warn("Could not play warning sound:", e);
+      console.warn("Gagal mainkan suara peringatan:", e);
     }
   }
 
-  // Play "ting" sound for "Good Distance" - high frequency notification
+  /* ============================================================================
+     SUARA NOTIFIKASI: "Jarak Baik" - Nada tinggi (sine wave)
+     ============================================================================ */
   function playTingSound() {
     try {
       initAudio();
       const oscillator = audioContext.createOscillator();
       const gain = audioContext.createGain();
       
-      oscillator.type = "sine";
-      oscillator.frequency.value = 880;  // High A5 note
+      oscillator.type = "sine";           // Gelombang sinus = suara murni/halus
+      oscillator.frequency.value = 880;   // Nada A5 (tinggi, seperti "ting")
       oscillator.connect(gain);
       gain.connect(audioContext.destination);
       
-      // Very short, crisp ting
+      // Envelope sangat cepat: "ting" singkat
       const now = audioContext.currentTime;
       gain.gain.setValueAtTime(0.001, now);
-      gain.gain.exponentialRampToValueAtTime(0.2, now + 0.01);
-      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.15);
+      gain.gain.exponentialRampToValueAtTime(0.2, now + 0.01);  // Attack super cepat
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.15); // Release cepat
       
       oscillator.start(now);
-      oscillator.stop(now + 0.16);
+      oscillator.stop(now + 0.16); // Durasi ~0.16 detik
     } catch (e) {
-      console.warn("Could not play ting sound:", e);
+      console.warn("Gagal mainkan suara ting:", e);
     }
   }
 
-  // Update UI based on detected status
+  /* ============================================================================
+     UPDATE UI: Ubah tampilan berdasarkan status deteksi
+     ============================================================================ */
   function updateUI(status, confidence) {
     const now = Date.now();
     
-    // Check cooldown to prevent rapid state flipping
+    // COOLDOWN: Cegah perubahan status terlalu cepat (flickering)
     if (now - lastChangeTime < COOLDOWN_MS) {
-      return; // Still in cooldown, don't change state
+      return; // Masih dalam jeda, abaikan update ini
     }
 
-    // Determine new status
+    // Tentukan status baru berdasarkan prediksi model
     let newStatus = null;
     if (status === CLASS_TOO_CLOSE && confidence >= CONFIDENCE_THRESHOLD) {
       newStatus = "too-close";
     } else if (status === CLASS_GOOD_DISTANCE && confidence >= CONFIDENCE_THRESHOLD) {
       newStatus = "good-distance";
     }
+    // Jika confidence < threshold, newStatus tetap null (netral)
 
-    // Only update if status actually changed
+    // Hanya update UI jika status benar-benar berubah
     if (newStatus !== lastStatus) {
       lastStatus = newStatus;
       lastChangeTime = now;
 
-      // Reset all classes
+      // Reset semua tampilan ke default
       body.classList.remove("too-close", "good-distance");
       hint.hidden = true;
       statusText.hidden = true;
       statusBadge.hidden = true;
 
-      if (newStatus === "too-close") {
-        // TOO CLOSE - Red screen + warning sound
+if (newStatus === "too-close") {
+        // ===== TERLALU DEKAT: Background merah + suara peringatan =====
         body.classList.add("too-close");
         stage.style.background = "#8B0000";
         statusText.hidden = false;
-        statusText.textContent = "⚠️ TOO CLOSE";
+        statusText.textContent = "⚠️ TERLALU DEKAT";
         statusBadge.hidden = false;
-        statusBadge.textContent = "TOO CLOSE";
+        statusBadge.textContent = "TERLALU DEKAT";
         statusBadge.className = "status-badge status-too-close";
         playWarningSound();
+        
       } else if (newStatus === "good-distance") {
-        // GOOD DISTANCE - Green screen + ting sound
+        // ===== JARAK BAIK: Background hijau + suara ting =====
         body.classList.add("good-distance");
         stage.style.background = "#006400";
         statusText.hidden = false;
-        statusText.textContent = "✅ GOOD DISTANCE";
+        statusText.textContent = "✅ JARAK BAIK";
         statusBadge.hidden = false;
-        statusBadge.textContent = "GOOD DISTANCE";
+        statusBadge.textContent = "JARAK BAIK";
         statusBadge.className = "status-badge status-good-distance";
         playTingSound();
+        
       } else {
-        // No confident detection - neutral state
+        // ===== NETRAL: Belum ada deteksi yakin =====
         stage.style.background = "";
         hint.hidden = false;
-        hint.textContent = "Position yourself in front of the camera...";
+        hint.textContent = "Posisikan diri Anda di depan kamera...";
       }
     }
 
-    // Always update the prediction label
+    // Selalu update label prediksi real-time (class + persentase)
     label.textContent = `${status} - ${(confidence * 100).toFixed(1)}%`;
   }
 
-  // Start the camera and model
+  /* ============================================================================
+     START: Tombol "Mulai Kamera" diklik
+     ============================================================================ */
   document.getElementById("startBtn").onclick = async function start() {
-    initAudio(); // Initialize audio on user click
+    initAudio(); // Inisialisasi audio saat user klik (wajib browser policy)
     
-    label.textContent = "loading model...";
+    label.textContent = "memuat model...";
     try {
+      // Load model dari Teachable Machine (model.json + metadata.json)
       model = await tmImage.load(MODEL_URL + "model.json", MODEL_URL + "metadata.json");
     } catch (e) {
-      label.textContent = "❌ Failed to load model. Check MODEL_URL in the code.";
+      label.textContent = "❌ Gagal memuat model. Cek MODEL_URL di kode.";
       console.error(e);
       return;
     }
 
-    webcam = new tmImage.Webcam(200, 200, true); // width, height, flip
-    await webcam.setup(); // request camera access
-    await webcam.play();
-    document.getElementById("cam").appendChild(webcam.canvas);
+    // Buat webcam: lebar 200px, tinggi 200px, flip horizontal (mirror)
+    webcam = new tmImage.Webcam(200, 200, true);
+    await webcam.setup();   // Minta izin akses kamera
+    await webcam.play();    // Mulai streaming video
+    document.getElementById("cam").appendChild(webcam.canvas); // Tampilkan ke halaman
     
-    document.getElementById("startBtn").disabled = true;
-    label.textContent = "running! Move closer/further from screen.";
+    document.getElementById("startBtn").disabled = true; // Nonaktifkan tombol
+    label.textContent = "berjalan! Maju/mundur dari layar.";
     isRunning = true;
-    requestAnimationFrame(loop);
+    requestAnimationFrame(loop); // Mulai loop prediksi
   };
 
-  // Main prediction loop
+  /* ============================================================================
+     LOOP UTAMA: Dipanggil setiap frame (requestAnimationFrame)
+     ============================================================================ */
   async function loop() {
     if (!isRunning) return;
-    webcam.update(); // Get new frame from webcam
-    await predict();
-    requestAnimationFrame(loop);
+    webcam.update();           // Ambil frame terbaru dari webcam
+    await predict();           // Jalankan prediksi
+    requestAnimationFrame(loop); // Jadwalkan frame berikutnya
   }
 
-  // Run prediction and handle results
+  /* ============================================================================
+     PREDIKSI: Kirim frame ke model, ambil hasil tertinggi
+     ============================================================================ */
   async function predict() {
+    // Jalankan inferensi model pada canvas webcam
     const predictions = await model.predict(webcam.canvas);
     
-    // Find the top prediction
+    // Cari prediksi dengan probabilitas tertinggi
     let top = predictions[0];
     for (const p of predictions) {
       if (p.probability > top.probability) top = p;
     }
     
-    // Update UI with the top prediction
+    // Kirim hasil ke fungsi update UI
     updateUI(top.className, top.probability);
   }
   </script>
