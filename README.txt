@@ -1,5 +1,4 @@
 YOUR DEMO — 3 easy steps
-(Media Production Class C, Vokasi UI)
 
 What's in this folder:
   index.html   <- your demo (open this to edit)
